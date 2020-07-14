@@ -35,6 +35,11 @@ find_package(Glog 0.3.4 REQUIRED)
 find_package(OpenCV REQUIRED)
 include_directories(${OPENCV_INCLUDE_DIRS})
 
+#ZLIB
+find_package(ZLIB)
+include_directories(${ZLIB_INCLUDE_DIRS})
+
+
 # OpenGV
 find_package(opengv REQUIRED)
 include_directories(${OPENGV_INCLUDE_DIRS})
@@ -131,7 +136,9 @@ add_library(BaseLib
   src/opt/visibility_estimator.cc
 )
 target_link_libraries(BaseLib
-  ${OpenCV_LIBS})
+  ${OpenCV_LIBS}
+  ${ZLIB_LIBRARIES})
+
 target_compile_options(BaseLib PRIVATE -Wno-sign-compare)
 set(BASE_LIB_LIBRARIES
   BaseLib

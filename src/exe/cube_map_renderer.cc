@@ -110,6 +110,324 @@ inline T Median9(T* p) {
   return p[4];
 }
 
+size_t splitString(const std::string &txt, std::vector<std::string> &strs, char ch)
+{
+    size_t pos = txt.find( ch );
+    size_t initialPos = 0;
+    strs.clear();
+
+    // Decompose statement
+    while( pos != std::string::npos ) {
+        strs.push_back( txt.substr( initialPos, pos - initialPos ) );
+        initialPos = pos + 1;
+
+        pos = txt.find( ch, initialPos );
+    }
+
+    // Add the last one
+    strs.push_back( txt.substr( initialPos, std::min( pos, txt.size() ) - initialPos + 1 ) );
+
+    return strs.size();
+}
+
+
+
+int makeTheCubeMap(pcl::PointCloud<pcl::PointXYZRGBA>& cloud, pcl::PointXYZ sensor_center, std::string output_base_path, int image_side_length){
+
+    // Settings
+    const int image_width = image_side_length;
+    const int image_height = image_side_length;
+
+    // Convention: (0, 0) is the upper left image corner.
+    const int image_cx = image_width / 2;
+    const int image_cy = image_height / 2;
+    const int image_fx = image_width / 2;
+    const int image_fy = image_height / 2;
+
+    // Write intrinsics.
+    if (!output_base_path.empty()) {
+      std::string intrinsics_filename = output_base_path + ".intrinsics.txt";
+      std::ofstream intrinsics_stream(intrinsics_filename.c_str(), std::ios::out);
+      if (!intrinsics_stream.is_open()) {
+        std::cerr << "ERROR: Could not write to " << intrinsics_filename << std::endl;
+        return EXIT_FAILURE;
+      }
+
+      intrinsics_stream << "# Cube map face image intrinsics in the format: width height fx fy cx cy" << std::endl;
+      intrinsics_stream << "# For the principal point the convention having pixel coordinates (0, 0) at the top left corner of the image (instead of the center of the top left pixel) is used." << std::endl;
+      intrinsics_stream << image_width << " " << image_height << " " << image_fx << " " << image_fy << " " << image_cx << " " << image_cy;
+      intrinsics_stream.close();
+    }
+
+    // Loop over cube map faces.
+    for (int face = 0; face < 6; ++ face) {
+      Eigen::Matrix3f R;
+      std::string face_name;
+      switch (face) {
+      case 0:
+        // Front.
+        face_name = "front";
+        // Forward:  +Z
+        // Up:       -Y
+        // Right:    +X
+        R <<  1,  0,  0,
+              0,  1,  0,
+              0,  0,  1;
+        break;
+      case 1:
+        // Left.
+        face_name = "left";
+        // Forward:  -X
+        // Up:       -Y
+        // Right:    +Z
+        R <<  0,  0,  1,
+              0,  1,  0,
+             -1,  0,  0;
+        break;
+      case 2:
+        // Back.
+        face_name = "back";
+        // Forward:  -Z
+        // Up:       -Y
+        // Right:    -X
+        R << -1,  0,  0,
+              0,  1,  0,
+              0,  0, -1;
+        break;
+      case 3:
+        // Right.
+        face_name = "right";
+        // Forward:  +X
+        // Up:       -Y
+        // Right:    -Z
+        R <<  0,  0, -1,
+              0,  1,  0,
+              1,  0,  0;
+        break;
+      case 4:
+        // Down (90 deg pitch change from side 0).
+        face_name = "down";
+        // Forward:  +Y
+        // Up:       +Z
+        // Right:    +X
+        R <<  1,  0,  0,
+              0,  0, -1,
+              0,  1,  0;
+        break;
+      case 5:
+        // Up (90 deg pitch change from side 0).
+        face_name = "up";
+        // Forward:  -Y
+        // Up:       -Z
+        // Right:    +X
+        R <<  1,  0,  0,
+              0,  0,  1,
+              0, -1,  0;
+        break;
+      }
+
+//      std::cout << "looped over faces" << std::endl;
+
+      // Render depth and color image.
+      cv::Mat_<cv::Vec3b> color_image(image_height, image_width);
+      cv::Mat_<float> depth_image(image_height, image_width);
+      for (int y = 0; y < image_height; ++ y) {
+        for (int x = 0; x < image_width; ++ x) {
+          color_image(y, x) = cv::Vec3b(0, 0, 0);
+          depth_image(y, x) = std::numeric_limits<float>::infinity();
+        }
+      }
+
+      for (std::size_t i = 0; i < cloud.size(); ++ i) {
+        const pcl::PointXYZRGBA& point = cloud.at(i);
+//        point.x-=sensor_center.x, point.y-=sensor_center.y, point.z-=sensor_center.z;
+        Eigen::Vector3f r_p = R * (point.getVector3fMap()-sensor_center.getVector3fMap());
+//        Eigen::Vector3f r_p = R * point.getVector3fMap()-sensor_center.getVector3fMap();
+        if (r_p(2) <= 0.f) {
+          continue;
+        }
+
+        float x = image_fx * r_p(0) / r_p(2) + image_cx;
+        float y = image_fy * r_p(1) / r_p(2) + image_cy;
+
+        // NOTE: Simple rounding and Z-buffering. More sophisticated methods
+        //       might improve the result.
+        int ix = static_cast<int>(x);
+        int iy = static_cast<int>(y);
+        if (ix >= 0 && iy >= 0 && ix < image_width && iy < image_height) {
+          if (r_p(2) < depth_image(y, x)) {
+            color_image(y, x) = cv::Vec3b(point.b, point.g, point.r);
+            depth_image(y, x) = r_p(2);
+          }
+        }
+      }
+
+//      std::cout << "loaded color and vectors" << std::endl;
+
+
+      // Slightly fill in images.
+      // NOTE: This is not very sophisticated, but it was sufficient.
+      bool have_invalid_color_pixels = false;
+      cv::Mat_<cv::Vec3b> filled_in_color_image(image_height, image_width);
+      cv::Mat_<float> filled_in_depth_image(image_height, image_width, std::numeric_limits<float>::infinity());
+      float buffer[9];
+      for (int y = 1; y < image_height - 1; ++ y) {
+        for (int x = 1; x < image_width - 1; ++ x) {
+          if (!std::isinf(depth_image(y, x))) {
+            filled_in_depth_image(y, x) = depth_image(y, x);
+            filled_in_color_image(y, x) = color_image(y, x);
+            continue;
+          }
+
+          int index = 0;
+          int r_sum = 0;
+          int g_sum = 0;
+          int b_sum = 0;
+          for (int dy = -1; dy <= 1; ++ dy) {
+            for (int dx = -1; dx <= 1; ++ dx) {
+              if (dx == 0 && dy == 0) {
+                continue;
+              }
+              if (!std::isinf(depth_image(y + dy, x + dx))) {
+                buffer[index] = depth_image(y + dy, x + dx);
+                r_sum += color_image(y + dy, x + dx)(2);
+                g_sum += color_image(y + dy, x + dx)(1);
+                b_sum += color_image(y + dy, x + dx)(0);
+                ++ index;
+              }
+            }
+          }
+
+          // NOTE: This does not take all data into account for 4, 6, or 8 samples.
+          if (index <= 1) {
+            // No fill-in.
+            filled_in_depth_image(y, x) = depth_image(y, x);
+          } else if (index == 2) {
+            filled_in_depth_image(y, x) = std::min(buffer[0], buffer[1]);
+          } else if (index <= 4) {
+            filled_in_depth_image(y, x) = Median3(buffer);
+          } else if (index <= 6) {
+            filled_in_depth_image(y, x) = Median5(buffer);
+          } else if (index <= 8) {
+            filled_in_depth_image(y, x) = Median7(buffer);
+          } else {  // if (index == 9) {
+            filled_in_depth_image(y, x) = Median9(buffer);
+          }
+
+          if (index > 0) {
+            filled_in_color_image(y, x) = cv::Vec3b(
+                b_sum / (1.f * index) + 0.5f,
+                g_sum / (1.f * index) + 0.5f,
+                r_sum / (1.f * index) + 0.5f);
+          } else {
+            have_invalid_color_pixels = true;
+            filled_in_color_image(y, x) = color_image(y, x);
+          }
+        }
+      }
+
+      cv::Mat_<bool> validity_map(image_height, image_width);
+      cv::Mat_<bool> filled_in_validity_map(image_height, image_width);
+      int true_count=0;
+      int false_count=0;
+      for (int y = 0; y < image_height; ++ y) {
+        for (int x = 0; x < image_width; ++ x) {
+          filled_in_validity_map(y, x) = !std::isinf(filled_in_depth_image(y, x));
+          if(filled_in_validity_map(y, x))
+              true_count++;
+          else
+              false_count++;
+        }
+      }
+
+      std::cout << "true: " << true_count  << std::endl;
+      std::cout << "false: " << false_count  << std::endl;
+      if(true_count == 0){
+          continue;
+      }
+
+
+      while (have_invalid_color_pixels) {
+        filled_in_color_image.copyTo(color_image);
+        filled_in_validity_map.copyTo(validity_map);
+        have_invalid_color_pixels = false;
+
+        for (int y = 0; y < image_height; ++ y) {
+          for (int x = 0; x < image_width; ++ x) {
+            if (validity_map(y, x)) {
+              filled_in_color_image(y, x) = color_image(y, x);
+              filled_in_validity_map(y, x) = true;
+              continue;
+            }
+
+            int index = 0;
+            int r_sum = 0;
+            int g_sum = 0;
+            int b_sum = 0;
+            for (int dy = std::max(0, y - 1), dy_max = std::min(image_height - 1, y + 1); dy <= dy_max; ++ dy) {
+              for (int dx = std::max(0, x - 1), dx_max = std::min(image_width - 1, x + 1); dx <= dx_max; ++ dx) {
+                if (dx == x && dy == y) {
+                  continue;
+                }
+                if (validity_map(dy, dx)) {
+                  const cv::Vec3b& color = color_image(dy, dx);
+                  r_sum += color(2);
+                  g_sum += color(1);
+                  b_sum += color(0);
+                  ++ index;
+                }
+              }
+            }
+
+            if (index > 0) {
+              filled_in_color_image(y, x) = cv::Vec3b(
+                  b_sum / (1.f * index) + 0.5f,
+                  g_sum / (1.f * index) + 0.5f,
+                  r_sum / (1.f * index) + 0.5f);
+              filled_in_validity_map(y, x) = true;
+            } else {
+              have_invalid_color_pixels = true;
+              filled_in_color_image(y, x) = color_image(y, x);
+              filled_in_validity_map(y, x) = false;
+            }
+          }
+        }
+      }
+
+//      std::cout << "fixed invalid colors" << std::endl;
+
+
+      if (output_base_path.empty()) {
+        cv::imshow(face_name + " color", filled_in_color_image);
+        cv::imshow(face_name + " depth", filled_in_depth_image / 8.f);
+        cv::waitKey(0);
+      } else {
+        // Write image.
+        cv::imwrite(output_base_path + '.' + face_name + ".png", filled_in_color_image);
+
+        // Write depth map.
+        FILE* file = fopen((output_base_path + '.' + face_name + ".depth").c_str(), "wb");
+        if (!file) {
+          std::cout << "Error: Cannot write depth output file." << std::endl;
+          return EXIT_FAILURE;
+        }
+        if (static_cast<std::size_t>(filled_in_depth_image.cols) != filled_in_depth_image.step / sizeof(float)) {
+          std::cout << "Error: Pitch does not match width." << std::endl;
+        }
+        fwrite(filled_in_depth_image.data, 1, filled_in_depth_image.step * filled_in_depth_image.rows, file);
+        fclose(file);
+      }
+    }
+
+    return 0;
+
+
+}
+
+
+
+
+
 int main(int argc, char** argv) {
   pcl::console::setVerbosityLevel(pcl::console::L_ALWAYS);
   
@@ -125,275 +443,48 @@ int main(int argc, char** argv) {
     std::cout << "Please provide the input path and the image side length." << std::endl;
     return EXIT_FAILURE;
   }
-  
-  // Load cloud.
-  pcl::PointCloud<pcl::PointXYZRGBA> cloud;
-  if (pcl::io::loadPLYFile(cloud_path, cloud) != 0) {
-    std::cout << "Cannot read cloud file: " << cloud_path << "!" << std::endl;
-    return EXIT_FAILURE;
+
+  // load the scanner_pos.txt file
+  std::ifstream file(cloud_path+"scanner_pos.txt");
+  std::cout << "\nLoad sensor position file..." << std::endl;
+  std::cout << "\t-from " << cloud_path+"scanner_pos.txt" << std::endl;
+  if(!file){
+      std::cout << "\nERROR: FILE DOES NOT EXIST OR IS EMPTY!" << std::endl;
+      return 1;
   }
-  
-  // Settings
-  const int image_width = image_side_length;
-  const int image_height = image_side_length;
-  
-  // Convention: (0, 0) is the upper left image corner.
-  const int image_cx = image_width / 2;
-  const int image_cy = image_height / 2;
-  const int image_fx = image_width / 2;
-  const int image_fy = image_height / 2;
-  
-  // Write intrinsics.
-  if (!output_base_path.empty()) {
-    std::string intrinsics_filename = output_base_path + ".intrinsics.txt";
-    std::ofstream intrinsics_stream(intrinsics_filename.c_str(), std::ios::out);
-    if (!intrinsics_stream.is_open()) {
-      std::cerr << "ERROR: Could not write to " << intrinsics_filename << std::endl;
-      return EXIT_FAILURE;
-    }
-    
-    intrinsics_stream << "# Cube map face image intrinsics in the format: width height fx fy cx cy" << std::endl;
-    intrinsics_stream << "# For the principal point the convention having pixel coordinates (0, 0) at the top left corner of the image (instead of the center of the top left pixel) is used." << std::endl;
-    intrinsics_stream << image_width << " " << image_height << " " << image_fx << " " << image_fy << " " << image_cx << " " << image_cy;
-    intrinsics_stream.close();
-  }
-  
-  // Loop over cube map faces.
-  for (int face = 0; face < 6; ++ face) {
-    Eigen::Matrix3f R;
-    std::string face_name;
-    switch (face) {
-    case 0:
-      // Front.
-      face_name = "front";
-      // Forward:  +Z
-      // Up:       -Y
-      // Right:    +X
-      R <<  1,  0,  0,
-            0,  1,  0,
-            0,  0,  1;
-      break;
-    case 1:
-      // Left.
-      face_name = "left";
-      // Forward:  -X
-      // Up:       -Y
-      // Right:    +Z
-      R <<  0,  0,  1,
-            0,  1,  0,
-           -1,  0,  0;
-      break;
-    case 2:
-      // Back.
-      face_name = "back";
-      // Forward:  -Z
-      // Up:       -Y
-      // Right:    -X
-      R << -1,  0,  0,
-            0,  1,  0,
-            0,  0, -1;
-      break;
-    case 3:
-      // Right.
-      face_name = "right";
-      // Forward:  +X
-      // Up:       -Y
-      // Right:    -Z
-      R <<  0,  0, -1,
-            0,  1,  0,
-            1,  0,  0;
-      break;
-    case 4:
-      // Down (90 deg pitch change from side 0).
-      face_name = "down";
-      // Forward:  +Y
-      // Up:       +Z
-      // Right:    +X
-      R <<  1,  0,  0,
-            0,  0, -1,
-            0,  1,  0;
-      break;
-    case 5:
-      // Up (90 deg pitch change from side 0).
-      face_name = "up";
-      // Forward:  -Y
-      // Up:       -Z
-      // Right:    +X
-      R <<  1,  0,  0,
-            0,  0,  1,
-            0, -1,  0;
-      break;
-    }
-    
-    // Render depth and color image.
-    cv::Mat_<cv::Vec3b> color_image(image_height, image_width);
-    cv::Mat_<float> depth_image(image_height, image_width);
-    for (int y = 0; y < image_height; ++ y) {
-      for (int x = 0; x < image_width; ++ x) {
-        color_image(y, x) = cv::Vec3b(0, 0, 0);
-        depth_image(y, x) = std::numeric_limits<float>::infinity();
-      }
-    }
-    
-    for (std::size_t i = 0; i < cloud.size(); ++ i) {
-      const pcl::PointXYZRGBA& point = cloud.at(i);
-      Eigen::Vector3f r_p = R * point.getVector3fMap();
-      if (r_p(2) <= 0.f) {
-        continue;
-      }
-      
-      float x = image_fx * r_p(0) / r_p(2) + image_cx;
-      float y = image_fy * r_p(1) / r_p(2) + image_cy;
-      
-      // NOTE: Simple rounding and Z-buffering. More sophisticated methods
-      //       might improve the result.
-      int ix = static_cast<int>(x);
-      int iy = static_cast<int>(y);
-      if (ix >= 0 && iy >= 0 && ix < image_width && iy < image_height) {
-        if (r_p(2) < depth_image(y, x)) {
-          color_image(y, x) = cv::Vec3b(point.b, point.g, point.r);
-          depth_image(y, x) = r_p(2);
-        }
-      }
-    }
-    
-    // Slightly fill in images.
-    // NOTE: This is not very sophisticated, but it was sufficient.
-    bool have_invalid_color_pixels = false;
-    cv::Mat_<cv::Vec3b> filled_in_color_image(image_height, image_width);
-    cv::Mat_<float> filled_in_depth_image(image_height, image_width, std::numeric_limits<float>::infinity());
-    float buffer[9];
-    for (int y = 1; y < image_height - 1; ++ y) {
-      for (int x = 1; x < image_width - 1; ++ x) {
-        if (!std::isinf(depth_image(y, x))) {
-          filled_in_depth_image(y, x) = depth_image(y, x);
-          filled_in_color_image(y, x) = color_image(y, x);
-          continue;
-        }
-        
-        int index = 0;
-        int r_sum = 0;
-        int g_sum = 0;
-        int b_sum = 0;
-        for (int dy = -1; dy <= 1; ++ dy) {
-          for (int dx = -1; dx <= 1; ++ dx) {
-            if (dx == 0 && dy == 0) {
-              continue;
-            }
-            if (!std::isinf(depth_image(y + dy, x + dx))) {
-              buffer[index] = depth_image(y + dy, x + dx);
-              r_sum += color_image(y + dy, x + dx)(2);
-              g_sum += color_image(y + dy, x + dx)(1);
-              b_sum += color_image(y + dy, x + dx)(0);
-              ++ index;
-            }
-          }
-        }
-        
-        // NOTE: This does not take all data into account for 4, 6, or 8 samples.
-        if (index <= 1) {
-          // No fill-in.
-          filled_in_depth_image(y, x) = depth_image(y, x);
-        } else if (index == 2) {
-          filled_in_depth_image(y, x) = std::min(buffer[0], buffer[1]);
-        } else if (index <= 4) {
-          filled_in_depth_image(y, x) = Median3(buffer);
-        } else if (index <= 6) {
-          filled_in_depth_image(y, x) = Median5(buffer);
-        } else if (index <= 8) {
-          filled_in_depth_image(y, x) = Median7(buffer);
-        } else {  // if (index == 9) {
-          filled_in_depth_image(y, x) = Median9(buffer);
-        }
-        
-        if (index > 0) {
-          filled_in_color_image(y, x) = cv::Vec3b(
-              b_sum / (1.f * index) + 0.5f,
-              g_sum / (1.f * index) + 0.5f,
-              r_sum / (1.f * index) + 0.5f);
-        } else {
-          have_invalid_color_pixels = true;
-          filled_in_color_image(y, x) = color_image(y, x);
-        }
-      }
-    }
-    
-    cv::Mat_<bool> validity_map(image_height, image_width);
-    cv::Mat_<bool> filled_in_validity_map(image_height, image_width);
-    for (int y = 0; y < image_height; ++ y) {
-      for (int x = 0; x < image_width; ++ x) {
-        filled_in_validity_map(y, x) = !std::isinf(filled_in_depth_image(y, x));
-      }
-    }
-    while (have_invalid_color_pixels) {
-      filled_in_color_image.copyTo(color_image);
-      filled_in_validity_map.copyTo(validity_map);
-      have_invalid_color_pixels = false;
-      
-      for (int y = 0; y < image_height; ++ y) {
-        for (int x = 0; x < image_width; ++ x) {
-          if (validity_map(y, x)) {
-            filled_in_color_image(y, x) = color_image(y, x);
-            filled_in_validity_map(y, x) = true;
-            continue;
-          }
-          
-          int index = 0;
-          int r_sum = 0;
-          int g_sum = 0;
-          int b_sum = 0;
-          for (int dy = std::max(0, y - 1), dy_max = std::min(image_height - 1, y + 1); dy <= dy_max; ++ dy) {
-            for (int dx = std::max(0, x - 1), dx_max = std::min(image_width - 1, x + 1); dx <= dx_max; ++ dx) {
-              if (dx == x && dy == y) {
-                continue;
-              }
-              if (validity_map(dy, dx)) {
-                const cv::Vec3b& color = color_image(dy, dx);
-                r_sum += color(2);
-                g_sum += color(1);
-                b_sum += color(0);
-                ++ index;
-              }
-            }
-          }
-          
-          if (index > 0) {
-            filled_in_color_image(y, x) = cv::Vec3b(
-                b_sum / (1.f * index) + 0.5f,
-                g_sum / (1.f * index) + 0.5f,
-                r_sum / (1.f * index) + 0.5f);
-            filled_in_validity_map(y, x) = true;
-          } else {
-            have_invalid_color_pixels = true;
-            filled_in_color_image(y, x) = color_image(y, x);
-            filled_in_validity_map(y, x) = false;
-          }
-        }
-      }
-    }
-    
-    if (output_base_path.empty()) {
-      cv::imshow(face_name + " color", filled_in_color_image);
-      cv::imshow(face_name + " depth", filled_in_depth_image / 8.f);
-      cv::waitKey(0);
-    } else {
-      // Write image.
-      cv::imwrite(output_base_path + '.' + face_name + ".png", filled_in_color_image);
-      
-      // Write depth map.
-      FILE* file = fopen((output_base_path + '.' + face_name + ".depth").c_str(), "wb");
-      if (!file) {
-        std::cout << "Error: Cannot write depth output file." << std::endl;
+
+  std::string line;
+  std::vector<std::string> lineAsVector;
+  int i = 1;
+  while(std::getline(file, line)){
+
+      splitString(line, lineAsVector, ' ');
+      // the file name
+      std::string read_file = lineAsVector[0].c_str();
+      // the sensor position
+      pcl::PointXYZ sc = pcl::PointXYZ(std::stod(lineAsVector[1]),std::stod(lineAsVector[2]),std::stod(lineAsVector[3]));
+      // out file name for the cube maps
+      std::string output_path = output_base_path+"/scan"+std::to_string(i++);
+      // Load the individual scan clouds
+      pcl::PointCloud<pcl::PointXYZRGBA> cloud;
+      if (pcl::io::loadPLYFile(cloud_path+read_file+".ply", cloud) != 0) {
+        std::cout << "Cannot read cloud file: " << cloud_path+read_file+".ply" << "!" << std::endl;
         return EXIT_FAILURE;
       }
-      if (static_cast<std::size_t>(filled_in_depth_image.cols) != filled_in_depth_image.step / sizeof(float)) {
-        std::cout << "Error: Pitch does not match width." << std::endl;
-      }
-      fwrite(filled_in_depth_image.data, 1, filled_in_depth_image.step * filled_in_depth_image.rows, file);
-      fclose(file);
-    }
-  }
-  
+      // original code line 137 - 398
+      makeTheCubeMap(cloud, sc, output_path, image_side_length);
+
+      std::cout << read_file << " done..." << std::endl;
+
+  };
+
   std::cout << "Finished!" << std::endl;
   return EXIT_SUCCESS;
 }
+
+
+
+
+
+
+
