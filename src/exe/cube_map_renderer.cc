@@ -467,8 +467,8 @@ int main(int argc, char** argv) {
       std::string output_path = output_base_path+"/scan"+std::to_string(i++);
       // Load the individual scan clouds
       pcl::PointCloud<pcl::PointXYZRGBA> cloud;
-      if (pcl::io::loadPLYFile(cloud_path+read_file+".ply", cloud) != 0) {
-        std::cout << "Cannot read cloud file: " << cloud_path+read_file+".ply" << "!" << std::endl;
+      if (pcl::io::loadPLYFile(cloud_path+read_file, cloud) != 0) {
+        std::cout << "Cannot read cloud file: " << cloud_path+read_file << "!" << std::endl;
         return EXIT_FAILURE;
       }
       // original code line 137 - 398
